@@ -10,3 +10,4 @@ data/raw/
 .dagster_home/
 .ruff_cache/
 *.zip
+.tmp_dagster_home_6dc4tawg/ .tmp_dagster_home_ul3_wuvk/
