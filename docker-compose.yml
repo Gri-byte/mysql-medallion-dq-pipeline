@@ -1,0 +1,21 @@
+# Optional: a throwaway MySQL 8 for people who prefer not to install the server.
+#   docker compose up -d
+# then use MYSQL_HOST=127.0.0.1, MYSQL_USER=root, MYSQL_PASSWORD=local_password in your .env
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: hotel-dq-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: local_password
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-plocal_password"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  mysql_data:

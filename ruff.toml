@@ -1,0 +1,8 @@
+line-length = 130
+target-version = "py310"
+
+[lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[lint.per-file-ignores]
+"tests/*" = ["E501"]   # long SQL strings are clearer on one line

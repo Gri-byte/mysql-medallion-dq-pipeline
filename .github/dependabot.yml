@@ -1,0 +1,11 @@
+version: 2
+updates:
+  # Keeps the actions/* versions in the workflow current (avoids deprecated-runtime CI failures).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
