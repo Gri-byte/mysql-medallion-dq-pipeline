@@ -9,3 +9,4 @@ data/raw/
 .vscode/
 .dagster_home/
 .ruff_cache/
+*.zip
