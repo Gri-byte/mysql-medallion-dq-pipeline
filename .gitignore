@@ -7,3 +7,5 @@ venv/
 data/raw/
 .idea/
 .vscode/
+.dagster_home/
+.ruff_cache/

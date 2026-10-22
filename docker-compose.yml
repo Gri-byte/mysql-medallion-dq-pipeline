@@ -1,21 +1,71 @@
-# Optional: a throwaway MySQL 8 for people who prefer not to install the server.
-#   docker compose up -d
-# then use MYSQL_HOST=127.0.0.1, MYSQL_USER=root, MYSQL_PASSWORD=local_password in your .env
+# Whole project with one command, no local Python or MySQL needed:
+#
+#   docker compose up --build                       # start MySQL, run the pipeline once, then exit
+#   docker compose run --rm pipeline pytest -v      # run the test suite inside the container
+#   docker compose --profile dagster up --build dagster   # Dagster UI at http://localhost:3000
+#   docker compose down -v                          # stop everything and delete the volumes
+#
+# The password comes from MYSQL_PASSWORD (shell or .env file); default: local_password.
+# MySQL is published on host port 3307 (not 3306) so it never collides with a MySQL installed on
+# your machine. Connect DBeaver / any client to 127.0.0.1:3307 with user root.
+# Change the ports with MYSQL_HOST_PORT / DAGSTER_PORT.
+
 services:
   mysql:
     image: mysql:8.0
     container_name: hotel-dq-mysql
     environment:
-      MYSQL_ROOT_PASSWORD: local_password
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:-local_password}
     ports:
-      - "3306:3306"
+      - "${MYSQL_HOST_PORT:-3307}:3306"
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-plocal_password"]
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
       interval: 10s
       timeout: 5s
-      retries: 10
+      retries: 12
+      start_period: 20s
+
+  pipeline:
+    build: .
+    container_name: hotel-dq-pipeline
+    depends_on:
+      mysql:
+        condition: service_healthy   # wait until MySQL accepts connections
+    environment:
+      MYSQL_HOST: mysql              # service name = hostname inside the compose network
+      MYSQL_PORT: "3306"             # container-internal port, not the published one
+      MYSQL_USER: root
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-local_password}
+    volumes:
+      - ./data:/app/data             # generated CSVs appear in ./data/raw on your machine
+
+  # Optional orchestration UI + scheduler. Only starts when the "dagster" profile is requested, so a
+  # plain `docker compose up` behaves exactly as before.
+  # `dagster dev` is the development server (web UI + daemon in one process): fine for a laptop,
+  # not a production deployment.
+  dagster:
+    build: .
+    container_name: hotel-dq-dagster
+    profiles: ["dagster"]
+    command: ["dagster", "dev", "-w", "workspace.yaml", "-h", "0.0.0.0", "-p", "3000"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_USER: root
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-local_password}
+      DAGSTER_HOME: /dagster_home    # run history survives restarts (named volume below)
+      DQ_DATA_DIR: /app/data/raw
+    ports:
+      - "127.0.0.1:${DAGSTER_PORT:-3000}:3000"   # bound to localhost only: the UI has no authentication
+    volumes:
+      - dagster_home:/dagster_home
+      - ./data:/app/data
 
 volumes:
   mysql_data:
+  dagster_home:

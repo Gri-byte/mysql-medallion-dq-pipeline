@@ -87,7 +87,7 @@ The bronze row counts are higher than the silver ones because the files contain 
 ## Quick start
 
 Requirements: Python 3.10+, and a MySQL 8 server you can create databases on
-(a local install, or `docker compose up -d` with the included `docker-compose.yml`).
+(a local install), or just Docker (see below).
 
 ```bash
 git clone https://github.com/Gri-byte/mysql-medallion-dq-pipeline.git
@@ -114,12 +114,72 @@ python -m src.run_pipeline --no-generate --data-dir ./my_csvs    # your own file
 > `cryptography` is in `requirements.txt` because MySQL 8's default authentication
 > (`caching_sha2_password`) needs it with PyMySQL.
 
+### Or run everything with Docker (no Python or MySQL install needed)
+
+```bash
+docker compose up --build                        # MySQL + pipeline, runs once and exits
+docker compose run --rm pipeline pytest -v       # the test suite, inside the container
+docker compose down -v                           # stop and delete the database volume
+```
+
+- The password is read from `MYSQL_PASSWORD` (shell or `.env`); the default is `local_password`.
+- MySQL is published on **host port 3307**, not 3306, so it never collides with a MySQL already installed
+  on your machine. Connect DBeaver to `127.0.0.1:3307`, user `root`. Change it with `MYSQL_HOST_PORT`.
+- The pipeline container waits for MySQL's health check before starting, and runs as a non-root user.
+- Generated CSVs appear in `./data/raw` on your machine.
+
+## Orchestration with Dagster (optional)
+
+The CLI runs the pipeline once. [Dagster](https://dagster.io) adds what a real deployment needs on top:
+a schedule, run history, retries-on-demand and a UI where every quality check is visible. The business
+logic is **not** duplicated: the Dagster assets call the same functions the CLI uses.
+
+![Asset lineage: every layer shows its checks (12 / 16 / 6 passed) and last materialization](docs/dagster-lineage.png)
+
+| In the CLI | In Dagster |
+|---|---|
+| source, bronze, silver, gold stages | 4 **assets** with lineage (`source_csv_files -> bronze_raw -> silver_clean -> gold_star_schema`) |
+| 34 quality checks | 34 **blocking asset checks** (12 bronze, 16 silver, 6 gold), each with its description and failed-row metadata |
+| `ERROR` stops the run, `WARN` is reported | a failed `ERROR` check turns red and **downstream assets do not run**; a `WARN` is shown but blocks nothing |
+| `pipeline_runs` / `check_results` tables | the same tables, keyed by the Dagster run id, so the SQL views keep working |
+| run it by hand | **daily schedule at 06:00 (America/Argentina/Buenos_Aires)** while the Dagster daemon is running |
+
+![Two blocking checks failing on bronze (too many null keys): the run stops here and silver / gold are not rebuilt](docs/dagster-blocking-check.png)
+
+Run it locally (from the project root, with `requirements.txt` already installed):
+
+```bash
+pip install -r requirements-orchestration.txt
+mkdir .dagster_home
+export DAGSTER_HOME="$PWD/.dagster_home"     # Windows (cmd): set DAGSTER_HOME=%CD%\.dagster_home
+dagster dev -w workspace.yaml
+```
+
+Open <http://localhost:3000>, go to **Lineage** and press **Materialize all**. `DAGSTER_HOME` keeps the run
+history between restarts; without it Dagster uses a temporary folder.
+
+**Watch a gate stop the run:** open the Launchpad from the dropdown next to *Materialize all* and set
+
+```yaml
+ops:
+  source_csv_files:
+    config:
+      defect_rate: 0.30
+```
+
+Bronze's null-key checks fail, silver and gold are skipped, the run is marked failed in both Dagster and
+`hotel_dq.pipeline_runs`, and `hotel_gold` keeps serving the last good data.
+
+With Docker: `docker compose --profile dagster up --build dagster`, then open <http://localhost:3000>.
+The UI is published on localhost only, because it has no authentication.
+
 ## Tests
 
 ```bash
 pytest -v
 ```
 
+56 tests with Dagster installed, 46 without (the Dagster suite skips itself when `dagster` is missing).
 The tests run against a **real MySQL server** (not mocks) in databases prefixed `test_hotel_…`,
 and drop them afterwards. Your `hotel_*` databases are never touched.
 
@@ -127,10 +187,11 @@ and drop them afterwards. Your `hotel_*` databases are never touched.
 |---|---|
 | `test_generator.py` | The data generator is deterministic and its defect manifest adds up (no DB needed). |
 | `test_pipeline_e2e.py` | Silver row counts and quarantine reasons match the **injected ground truth**; nothing is silently lost; dirt is standardized; gold reconciles with silver; revenue is never mixed across currencies; re-running is idempotent; every analytics query returns rows. |
+| `test_dagster.py` | A full Dagster run materializes every asset and passes all 34 checks; silver matches the injected ground truth; a failed `ERROR` check blocks downstream assets and is recorded; a failed run never overwrites the last good gold; `WARN` failures do not block; asset checks map one-to-one to `checks.py`; the daily schedule is defined. |
 | `test_failure_modes.py` | Excess defects stop the pipeline at the right layer; a failed batch does **not** overwrite last good gold; schema drift and empty files are refused; the engine rejects bad rows even if the pipeline had a bug; the DQ engine's tolerance and severity rules behave as documented. |
 
-CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs lint, the full suite and a demo run
-against a `mysql:8.0` service container on every push and pull request.
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs lint, validates the Dagster definitions,
+runs the full suite and a demo run against a `mysql:8.0` service container on every push and pull request.
 
 ## Project layout
 
@@ -138,8 +199,12 @@ against a `mysql:8.0` service container on every push and pull request.
 sql/        00-04  DDL per layer        10_silver_load.sql   20_gold_load.sql   analytics_queries.sql
 src/        contracts.py  config.py  db.py  generate_data.py  ingest_bronze.py
             transform_silver.py  build_gold.py  checks.py  dq.py  run_pipeline.py
-tests/      generator, end-to-end and failure-mode suites
+orchestration/  resources.py  assets.py  definitions.py   (Dagster: assets, checks, job, schedule)
+tests/      generator, end-to-end, failure-mode and Dagster suites
+docs/       screenshots used in this README
 .github/    CI workflow + Dependabot
+Dockerfile  docker-compose.yml  (MySQL 8 + pipeline + optional Dagster)
+workspace.yaml  requirements-orchestration.txt
 ```
 
 The transformations are **plain SQL files** (the logic a data engineer reviews), executed by thin
@@ -164,12 +229,25 @@ Python orchestration. Python handles files, run bookkeeping and the DQ engine.
   grain includes `currency`.
 - **KPIs are attributed to the month of check-in.** Stays that cross a month boundary are not split, so
   no occupancy rate is published (it would be misleading); `room_nights_sold` and `ADR` are.
+- **Dagster wraps the logic, it does not replace it.** The SQL and the check catalogue stay in `src/`;
+  the CLI and the Dagster assets call the same functions, and a test asserts that the 34 asset checks
+  match `checks.py` one-to-one, so the two entry points cannot drift apart.
+- **Blocking asset checks instead of exceptions.** In Dagster a failed `ERROR` check keeps the layer's data
+  in MySQL for diagnosis but stops the next asset, which is the same contract as the CLI gate.
+- **No secrets in Dagster's configuration.** Credentials come from the environment / `.env` exactly as in
+  the CLI; only non-secret knobs (database prefix, quarantine threshold) are configurable resources.
+- **The schedule only fires while the Dagster daemon is running.** `dagster dev` includes it, so a laptop
+  that is off skips the run. `dagster dev` is a development server: a production deployment would run the
+  webserver and the daemon as separate services with Postgres as run storage.
+- **The Dagster source asset is synthetic.** It stands in for files landing from an upstream system;
+  everything downstream of it would stay the same behind a real source.
 - **Synthetic data.** The data is generated (fixed seed, fixed "today" of 2026-07-01) so the project is
   reproducible and contains no personal information.
 
 ## Possible extensions
 
-- Orchestrate with Dagster / Airflow and move the SQL transformations to dbt models + tests.
+- Move the SQL transformations to dbt models + tests and run them as Dagster assets.
+- Replace the synthetic source asset with a Dagster sensor that reacts to real files arriving.
 - Incremental silver / gold loads and Slowly Changing Dimensions (type 2) for `dim_property`.
 - Expose `dq.check_results` in a dashboard (failed checks over time, quarantine rate by reason).
 - Add a Great Expectations suite or contract tests for the source files.

@@ -1,0 +1,7 @@
+# Tells `dagster dev` where the definitions live:  dagster dev -w workspace.yaml
+# working_directory (relative to this file) puts the project root on the import path, so the
+# `orchestration` and `src` packages are found no matter where the command is launched from.
+load_from:
+  - python_module:
+      module_name: orchestration.definitions
+      working_directory: .

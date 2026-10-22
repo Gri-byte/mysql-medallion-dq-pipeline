@@ -64,15 +64,18 @@ def init_schemas(settings: Settings, reset: bool = False) -> None:
         conn.close()
 
 
-def _start_run(conn, settings: Settings, run_id: str) -> None:
+def start_run(conn, settings: Settings, run_id: str) -> None:
+    """Record a run as RUNNING. Idempotent: calling it again for the same run_id changes nothing,
+    so every Dagster asset of one run can call it without coordinating who goes first."""
     with conn.cursor() as cur:
         cur.execute(
-            f"INSERT INTO `{settings.dq}`.pipeline_runs (run_id, started_at, status) VALUES (%s, %s, 'RUNNING')",  # nosec B608
+            f"INSERT INTO `{settings.dq}`.pipeline_runs (run_id, started_at, status) VALUES (%s, %s, 'RUNNING') "  # nosec B608
+            "ON DUPLICATE KEY UPDATE run_id = run_id",
             (run_id, datetime.now().replace(microsecond=0)),
         )
 
 
-def _finish_run(conn, settings: Settings, run_id: str, status: str, stage: str | None, message: str | None) -> None:
+def finish_run(conn, settings: Settings, run_id: str, status: str, stage: str | None, message: str | None) -> None:
     with conn.cursor() as cur:
         cur.execute(
             f"UPDATE `{settings.dq}`.pipeline_runs SET finished_at = %s, status = %s, failed_stage = %s, message = %s "  # nosec B608
@@ -100,7 +103,7 @@ def run_pipeline(
     conn = connect(settings)
     stage = "generate"
     try:
-        _start_run(conn, settings, run_id)
+        start_run(conn, settings, run_id)
         if generate_data:
             result.manifest = generate(data_dir, n_bookings, n_guests, defect_rate, seed)
             log.info("generated synthetic data in %s", data_dir)
@@ -121,11 +124,11 @@ def run_pipeline(
         result.checks += run_checks(conn, settings, run_id, gold_checks(settings))
 
         result.status = "SUCCESS"
-        _finish_run(conn, settings, run_id, "SUCCESS", None, None)
+        finish_run(conn, settings, run_id, "SUCCESS", None, None)
         return result
     except Exception as exc:
         result.status = "FAILED"
-        _finish_run(conn, settings, run_id, "FAILED", stage, str(exc))
+        finish_run(conn, settings, run_id, "FAILED", stage, str(exc))
         raise
     finally:
         conn.close()

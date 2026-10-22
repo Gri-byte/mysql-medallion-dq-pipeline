@@ -68,8 +68,17 @@ def _persist(conn, settings: Settings, run_id: str, result: CheckResult) -> None
         )
 
 
-def run_checks(conn, settings: Settings, run_id: str, checks: list[Check]) -> list[CheckResult]:
-    """Run all checks of one layer, persist every result, then enforce the gate."""
+def blocking_failures(results: list[CheckResult]) -> list[CheckResult]:
+    """Failed checks that must stop the pipeline (severity ERROR)."""
+    return [r for r in results if r.status == "FAIL" and r.check.severity == "ERROR"]
+
+
+def evaluate_and_record(conn, settings: Settings, run_id: str, checks: list[Check]) -> list[CheckResult]:
+    """Run all checks of one layer and persist every result. Never raises on a failed check.
+
+    Used directly by orchestrators (Dagster) that decide for themselves how a failure blocks
+    downstream work; `run_checks` below adds the plain exception-based gate for the CLI.
+    """
     results = []
     for check in checks:
         result = evaluate(conn, check)
@@ -78,7 +87,13 @@ def run_checks(conn, settings: Settings, run_id: str, checks: list[Check]) -> li
         level = logging.INFO if result.status == "PASS" else (logging.ERROR if check.severity == "ERROR" else logging.WARNING)
         log.log(level, "[%s] %-48s %s (failed=%s total=%s)", check.layer, check.name, result.status,
                 result.failed_rows, result.total_rows)
-    blocking = [r for r in results if r.status == "FAIL" and r.check.severity == "ERROR"]
+    return results
+
+
+def run_checks(conn, settings: Settings, run_id: str, checks: list[Check]) -> list[CheckResult]:
+    """Run all checks of one layer, persist every result, then enforce the gate."""
+    results = evaluate_and_record(conn, settings, run_id, checks)
+    blocking = blocking_failures(results)
     if blocking:
         raise DataQualityError(checks[0].layer if checks else "unknown", blocking)
     return results
