@@ -10,6 +10,7 @@ import dataclasses
 import pymysql
 import pytest
 
+from src.checks import gold_checks
 from src.db import connect, fetch_all, scalar
 from src.dq import Check, DataQualityError, evaluate, run_checks
 from src.generate_data import generate
@@ -198,5 +199,27 @@ def test_warn_failures_do_not_block_but_error_failures_do(neg):
 
         persisted = fetch_all(conn, f"SELECT check_name, status FROM `{neg.dq}`.check_results ORDER BY result_id")
         assert persisted == [("warn_check", "FAIL"), ("error_check", "FAIL")]
+    finally:
+        conn.close()
+
+
+# ----------------------------------------------------------------------------- regressions
+def test_balance_check_ignores_fully_paid_bookings_and_catches_a_one_cent_overpayment(neg, tmp_path):
+    """Regression: `balance_due < -0.005` was folded by MySQL 8.0 into `<= 0.00`, so every fully-paid
+    booking (balance exactly 0) was reported as overpaid (716/768 rows) and the happy path failed."""
+    run_pipeline(neg, tmp_path, n_bookings=800, n_guests=250, defect_rate=0.04, seed=21, reset=True)
+    check = next(c for c in gold_checks(neg) if c.name == "fact_balance_not_negative")
+    fact = f"`{neg.gold}`.fact_bookings"
+
+    conn = connect(neg)
+    try:
+        assert scalar(conn, f"SELECT COUNT(*) FROM {fact} WHERE balance_due = 0") > 0, "fixture must contain zero balances"
+        result = evaluate(conn, check)
+        assert (result.status, result.failed_rows) == ("PASS", 0)
+
+        # The smallest overpayment a DECIMAL(12,2) can hold must still be caught.
+        conn.cursor().execute(f"UPDATE {fact} SET balance_due = -0.01 ORDER BY booking_id LIMIT 1")
+        result = evaluate(conn, check)
+        assert (result.status, result.failed_rows) == ("FAIL", 1)
     finally:
         conn.close()
