@@ -129,6 +129,8 @@ def gold_checks(s: Settings) -> list[Check]:
               "WHERE d.date_key IS NULL",
               description="the calendar dimension covers every check-in date"),
         Check("gold", "fact_balance_not_negative",
-              f"SELECT COUNT(*) FROM {gd}.fact_bookings WHERE balance_due < -0.005",  # nosec B608
+              # balance_due is an exact DECIMAL(12,2): no tolerance needed. Do NOT write `< -0.005`:
+              # MySQL 8.0 folds it to `<= 0.00` and flags every fully-paid booking as overpaid.
+              f"SELECT COUNT(*) FROM {gd}.fact_bookings WHERE balance_due < 0",  # nosec B608
               severity="WARN", description="guests are not charged more than the booking value"),
     ]
