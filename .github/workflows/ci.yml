@@ -48,7 +48,7 @@ jobs:
       - name: Lint
         run: ruff check src tests orchestration
 
-      - name: Validate Dagster definitions
+      - name: Validate dagster definitions
         run: |
           mkdir -p "$RUNNER_TEMP/dagster_home"
           DAGSTER_HOME="$RUNNER_TEMP/dagster_home" dagster definitions validate -w workspace.yaml
