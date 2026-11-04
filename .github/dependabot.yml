@@ -9,3 +9,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      # dagster-webserver pins the exact dagster version, so they can only move together.
+      dagster:
+        patterns:
+          - "dagster*"
